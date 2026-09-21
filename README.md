@@ -87,6 +87,3 @@ export through the sanitizer before committing it:
 python3 scripts/sanitize_workflow.py raw-export.json workflows/personal-reddit-digest.json
 ```
 
-## Licence
-
-MIT — see `LICENSE`.
