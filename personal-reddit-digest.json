@@ -1,0 +1,267 @@
+{
+  "name": "Personal Reddit Digest (read-only)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Read-only Reddit digest\n\nThis workflow **only reads** public Reddit listings.\n\nThere is no node here that submits, comments, votes,\nmessages, edits or moderates anything. The OAuth scope\nused is `read` only.\n\nMatches go to a personal digest, for me to read. If I\never reply to a thread I do it by hand in a browser,\nunder my own account, as any other Redditor would.\n\nUser-Agent is set explicitly and requests are throttled\nto one subreddit at a time with a 2s gap.\n",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -180,
+        -260
+      ],
+      "name": "About this workflow"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -180,
+        160
+      ],
+      "name": "Every 6 hours"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ─── EDIT THIS BLOCK — everything else can stay as-is ────────────────\n// Subreddits I follow. Workflow automation is a personal interest of\n// mine as well as my field — I read these to learn and to answer the\n// odd question I know something about. Read-only.\nconst SUBREDDITS = [\n  'n8n',\n  'automation',\n  'selfhosted',\n  'nocode',\n  'homelab',\n];\n\n// Phrases that mean \"this is a thread I want to read\".\n// Each hit adds 1 point. Matched case-insensitively.\nconst KEYWORDS = [\n  'how did you solve',\n  'how do you handle',\n  'human approval step',\n  'human in the loop',\n  'approval workflow',\n  'pause until approved',\n  'state between runs',\n  'persist data between executions',\n  'audit trail',\n  'who approved',\n  'show your workflow',\n  'lessons learned',\n  'this broke in production',\n  'self hosted n8n',\n  'best practice',\n];\n\n// A post needs at least this many points to reach my digest.\nconst SCORE_THRESHOLD = 1;\n\n// Ignore anything older than this many hours (keeps the digest fresh).\nconst MAX_AGE_HOURS = 24;\n// ─────────────────────────────────────────────────────────────────────\n\nreturn SUBREDDITS.map(subreddit => ({\n  json: { subreddit, keywords: KEYWORDS, threshold: SCORE_THRESHOLD, maxAgeHours: MAX_AGE_HOURS },\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        160
+      ],
+      "name": "Config — My Interests"
+    },
+    {
+      "parameters": {
+        "url": "=https://oauth.reddit.com/r/{{ $json.subreddit }}/new",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "redditOAuth2Api",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "50"
+            },
+            {
+              "name": "raw_json",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n:personal-reddit-digest:v1.0 (by /u/YOUR_USERNAME)"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          },
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        160
+      ],
+      "name": "Fetch New Posts (GET)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Flattens every subreddit listing, scores each post against my keywords,\n// and keeps the ones worth reading. Read-only: nothing here touches Reddit.\n\nconst cfg = $('Config — My Interests').first().json;\nconst keywords = cfg.keywords.map(k => k.toLowerCase());\nconst threshold = cfg.threshold;\nconst cutoff = Date.now() / 1000 - cfg.maxAgeHours * 3600;\n\nconst seen = new Set();\nconst hits = [];\n\nfor (const item of $input.all()) {\n  const children = item.json?.data?.children ?? [];\n\n  for (const child of children) {\n    const p = child.data ?? {};\n    if (!p.id || seen.has(p.id)) continue;\n    if (p.stickied) continue;\n    if ((p.created_utc ?? 0) < cutoff) continue;\n\n    const haystack = `${p.title ?? ''} ${p.selftext ?? ''}`.toLowerCase();\n    const matched = keywords.filter(k => haystack.includes(k));\n    if (matched.length < threshold) continue;\n\n    seen.add(p.id);\n    hits.push({\n      json: {\n        id: p.id,\n        subreddit: p.subreddit,\n        title: p.title,\n        author: p.author,\n        permalink: `https://reddit.com${p.permalink}`,\n        excerpt: (p.selftext ?? '').replace(/\\s+/g, ' ').slice(0, 280),\n        score: matched.length,\n        matched,\n        num_comments: p.num_comments,\n        created: new Date((p.created_utc ?? 0) * 1000).toISOString(),\n      },\n    });\n  }\n}\n\nhits.sort((a, b) => b.json.score - a.json.score || b.json.num_comments - a.json.num_comments);\n\n// Always return one item so the IF node has something to test.\nreturn [{ json: { count: hits.length, posts: hits.map(h => h.json) } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        160
+      ],
+      "name": "Match & Score"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-matches",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        700,
+        160
+      ],
+      "name": "Anything worth reading?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Turns the matches into a plain-text digest I can read on my phone.\nconst { count, posts } = $input.first().json;\n\nconst lines = posts.map((p, i) =>\n  `${i + 1}. r/${p.subreddit} — ${p.title}\\n   ${p.permalink}\\n   matched: ${p.matched.join(', ')} · ${p.num_comments} comments`\n);\n\nreturn [{\n  json: {\n    subject: `Reddit digest — ${count} post${count === 1 ? '' : 's'} worth a look`,\n    body: lines.join('\\n\\n') || 'Nothing matched today.',\n    count,\n    posts,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        60
+      ],
+      "name": "Build Digest"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1140,
+        60
+      ],
+      "name": "Send digest to me"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        920,
+        260
+      ],
+      "name": "Nothing today"
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [
+        [
+          {
+            "node": "Config — My Interests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config — My Interests": {
+      "main": [
+        [
+          {
+            "node": "Fetch New Posts (GET)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch New Posts (GET)": {
+      "main": [
+        [
+          {
+            "node": "Match & Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match & Score": {
+      "main": [
+        [
+          {
+            "node": "Anything worth reading?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything worth reading?": {
+      "main": [
+        [
+          {
+            "node": "Build Digest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing today",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Digest": {
+      "main": [
+        [
+          {
+            "node": "Send digest to me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {}
+}
